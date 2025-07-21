@@ -283,23 +283,6 @@ Based on the architectural improvements we've implemented:
 | **Larger Batch Size** (4096 → 8192) | More stable gradients |
 | **Encoder-to-Encoder Comparison** | More accurate similarity computation |
 
-### Measuring Your Performance
-
-You can benchmark VECMAN on your own data using our evaluation tools:
-
-```python
-# Run your own benchmarks
-from evaluate_webquestions_fixed import WebQuestionsEvaluator
-
-evaluator = WebQuestionsEvaluator()
-# ... setup and training ...
-results = evaluator.run_evaluation(questions, k=5)
-
-print("📊 Your Performance Metrics:")
-print(f"Average Retrieval Score: {results['avg_retrieval_score'].mean():.3f}")
-print(f"High Confidence Rate: {(results['max_retrieval_score'] > 0.5).mean()*100:.1f}%")
-```
-
 ### Community Benchmarks
 
 We encourage users to share their benchmark results! If you've evaluated VECMAN on your datasets, please:
