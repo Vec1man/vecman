@@ -24,7 +24,7 @@ pip install vecman
 
 ### Basic Usage
 
-```python#!/usr/bin/env python3
+```python
 """
 VECMAN Example Usage
 
