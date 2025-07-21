@@ -495,5 +495,3 @@ SOFTWARE.
 ---
 
 **Built with ❤️ for the ML community**
-
-[📚 Documentation](docs/) | [🐛 Issues](issues/) | [💬 Discussions](discussions/) | [🌟 Star us on GitHub](https://github.com/yourusername/vecman) 
