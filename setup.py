@@ -15,7 +15,7 @@ setup(
     author="Loaii abdalslam",
     author_email="loaiabdalslam@gmail.com",
     description="VECMAN - A VQ-VAE based vector database for text embeddings and retrieval",
-    long_description=open("README.md").read(),
+    long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     url="https://github.com/Vec1man/vecman",
     classifiers=[
@@ -24,4 +24,4 @@ setup(
         "Operating System :: OS Independent",
     ],
     python_requires=">=3.8",
-) 
+)
