@@ -335,7 +335,7 @@ If you use VECMAN in your research, please cite:
   title={VECMAN: High-Performance VQ-VAE Vector Database},
   author={Loaii abdalslam},
   year={2025},
-  url={https://github.com/yourusername/vecman}
+  url={https://github.com/Vec1man/vecman}
 }
 ```
 
