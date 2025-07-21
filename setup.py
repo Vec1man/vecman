@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="vecman",
-    version="2.7.9",
+    version="2.7.10",
     packages=find_packages(),
     install_requires=[
         "numpy>=1.17",
