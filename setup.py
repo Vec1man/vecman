@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="vecman",
-    version="0.1.0",
+    version="2.7.9",
     packages=find_packages(),
     install_requires=[
         "numpy>=1.17",
@@ -17,7 +17,7 @@ setup(
     description="VECMAN - A VQ-VAE based vector database for text embeddings and retrieval",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/vecman",
+    url="https://github.com/Vec1man/vecman",
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",

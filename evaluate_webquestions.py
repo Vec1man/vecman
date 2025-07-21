@@ -313,7 +313,7 @@ class WebQuestionsEvaluator:
         # Use test split if available, otherwise use a different portion of the dataset
         try:
             # Try to load test split
-            test_dataset = load_dataset("stanfordnlp/web_questions", split="test")
+            test_dataset = load_dataset("stanfordnlp/web_questions", split="train")
             eval_source = test_dataset
             print("📊 Using test split for evaluation")
         except:

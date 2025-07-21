@@ -440,8 +440,8 @@ If you use VECMAN in your research, please cite:
 ```bibtex
 @software{vecman2024,
   title={VECMAN: High-Performance VQ-VAE Vector Database},
-  author={Your Name},
-  year={2024},
+  author={Loaii abdalslam},
+  year={2025},
   url={https://github.com/yourusername/vecman}
 }
 ```
