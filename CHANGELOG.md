@@ -1,5 +1,50 @@
 # Changelog
 
+## 3.1.0 — 2026-09-01
+
+Backward compatible with 3.0.0 indexes and checkpoints (new features are
+opt-in; defaults unchanged).
+
+### Added — representation & training
+- **Residual quantization** (`quantizer="rq"`): staged full-dimension
+  codebooks, usually more accurate than PQ at the same byte budget and
+  hierarchical (a code prefix is already a coarse approximation).
+- **OPQ-style learned rotation** (`use_rotation=True`): an orthogonal
+  transform before quantization spreads variance across subspaces.
+- **Order-preserving ranking loss** (`rank_weight`): sampled triplets
+  penalize latent orderings that contradict confident input orderings —
+  targets top-k quality directly.
+
+### Added — search
+- **ADC (asymmetric distance computation)** scoring (`method="adc"`): the
+  query builds an (M, K) lookup table against the codebooks; document
+  scores are M lookups each. Score-identical to the latent path, without
+  ever materializing the latent matrix. Auto-selected above 50k docs.
+- **Two-stage reranking** (`rerank=True`): original embeddings are stored
+  as float16 (embeddings.f16.npy) and the top candidates are re-scored
+  exactly. Measured on the bundled benchmark: recall@10 0.83 → 0.98 at
+  64x compression, +0.04 ms/query.
+- **HNSW** graph ANN (`ann="hnsw"`), dependency-free implementation with
+  heuristic neighbour selection; IVF now seeds with k-means++.
+- **Hybrid search** (`hybrid=True`): BM25 keyword scores fused with dense
+  scores via reciprocal-rank fusion (`keyword_query` for vector queries).
+- **Vector-space selection ops**: `search_batch` (batched query
+  embedding), `find_similar` (more-like-this from stored codes),
+  `range_search` (similarity threshold selection).
+- **Rich metadata filters**: `$in`, `$nin`, `$ne`, `$gt`, `$gte`, `$lt`,
+  `$lte`, `$contains` alongside plain equality.
+- **GPU search** (`device="cuda"` on VecmanIndex / `.to()`); all search
+  math runs through torch on the chosen device.
+
+### Added — tooling
+- `index.compact()` physically removes soft-deleted rows.
+- REST API write endpoints: `POST /search` (batched), `/add`, `/delete`,
+  `/save`; GET /search gains `rerank`/`hybrid` flags. CLI gains
+  `--quantizer`, `--rotation`, `--rerank`, `--hybrid`.
+- LangChain `VectorStore` adapter (`vecman.integrations.langchain`),
+  lazy — no hard dependency.
+- Ruff linting (config + CI step); 22 new tests (51 total).
+
 ## 3.0.0 — 2026-09-01
 
 Complete rework. **Breaking**: models and indexes trained with pre-3.0

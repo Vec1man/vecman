@@ -27,13 +27,20 @@ query ──encoder──▶ latent ──cosine vs decompressed corpus latents�
 
 - **Product quantization (PQ)**: the latent is split into M subspaces, each
   with its own learned codebook — the same idea behind FAISS-PQ, but with
-  codebooks trained end-to-end by a neural encoder/decoder.
+  codebooks trained end-to-end by a neural encoder/decoder. **Residual
+  quantization** (`quantizer="rq"`) and an **OPQ-style learned rotation**
+  (`use_rotation=True`) are available for higher accuracy at the same bytes.
 - **EMA codebook updates + dead-code reinitialization** prevent codebook
-  collapse during training.
+  collapse; optional **ranking loss** (`rank_weight`) trains top-k ordering
+  directly.
 - Corpus codes are decompressed **once** at load time; every query after
-  that is one encoder pass plus one matrix multiplication.
-- Above 10k documents an **IVF index** (spherical k-means) restricts each
-  query to the closest `nprobe` clusters.
+  that is one encoder pass plus one matrix multiplication — or, with
+  **ADC**, a small lookup table and M gathers per document, so the latent
+  matrix is never materialized.
+- Candidate generation scales via **IVF** (spherical k-means++, auto above
+  10k docs) or a dependency-free **HNSW** graph.
+- **Two-stage reranking** (`rerank=True`) re-scores top candidates against
+  float16 originals: near-exact recall at compressed-index speed.
 
 ## Installation
 
@@ -69,6 +76,17 @@ index.add_texts(["A new document"], metadatas=[{"lang": "en"}])
 index.search("new stuff", k=3, filter={"lang": "en"})
 index.delete(0)
 index.save("index")
+
+# 4. Advanced search
+index.search("query", k=5, rerank=True)             # near-exact via stored f16 originals
+index.search("query", k=5, hybrid=True)             # BM25 + dense, RRF fusion
+index.search("query", k=5, method="adc")            # lookup-table scoring, lowest RAM
+index.search("query", k=5, ann="hnsw")              # graph ANN
+index.search("query", filter={"year": {"$gte": 2024}, "lang": {"$in": ["en", "ar"]}})
+index.search_batch(["q1", "q2", "q3"], k=5)         # batched query embedding
+index.find_similar(doc_id=7, k=5)                    # more-like-this from stored codes
+index.range_search("query", min_score=0.6)          # similarity threshold selection
+index.to("cuda")                                     # GPU search math
 ```
 
 Or from the command line:
@@ -78,7 +96,17 @@ vecman index docs.txt -o my_index --epochs 10
 vecman query "what is machine learning" -d my_index -k 5
 vecman info -d my_index
 vecman serve -d my_index -p 8080   # REST API, stdlib only
-# GET /search?q=...&k=5   GET /info   GET /health
+# GET  /search?q=...&k=5&rerank=1&hybrid=1     GET /info    GET /health
+# POST /search {"queries": [...]}  POST /add  POST /delete  POST /save
+```
+
+## LangChain
+
+```python
+from vecman.integrations.langchain import VecmanVectorStore  # needs langchain-core
+
+store = VecmanVectorStore(index, rerank=True)
+store.similarity_search("query", k=5)
 ```
 
 ## RAG in one call
@@ -120,12 +148,15 @@ We only publish numbers that come out of this script. One measured run
 python benchmarks/benchmark.py --n 2000 --dim 128 --epochs 40 --queries 50 --k 10 --clusters 200 --batch-size 256
 ```
 
-| Metric | Value |
-|--------|-------|
-| recall@10 vs exact search | 0.83 |
-| bytes/doc | 8 (vs 512 raw float32) |
-| compression ratio | 64x |
-| avg query latency | 2.7 ms (2k docs, CPU, brute force) |
+| Metric | PQ | RQ (+rank loss) |
+|--------|-----|-----|
+| recall@10, compressed only | 0.83 | 0.84 |
+| recall@10, ADC scoring | 0.83 (identical) | 0.84 (identical) |
+| **recall@10 with rerank** | **0.98** | **0.99** |
+| bytes/doc (codes) | 8 (vs 512 raw float32) | 8 |
+| compression ratio | 64x | 64x |
+| avg query, compressed | 0.7 ms | 2.8 ms |
+| avg query, reranked | 0.7 ms | 3.0 ms |
 
 Recall depends heavily on data geometry: distinguishing near-duplicate
 documents from 8-byte codes is fundamentally hard (increase

@@ -35,7 +35,9 @@ def trained_index():
     data = torch.from_numpy(vectors)
     for _ in range(30):
         _, _, loss, _ = model(data)
-        opt.zero_grad(); loss.backward(); opt.step()
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
     model.eval()
 
     index = VecmanIndex(model)

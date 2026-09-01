@@ -47,7 +47,7 @@ class NPZStreamDataset(IterableDataset):
 
 def resolve_device(device: str) -> str:
     if device == "cuda" and not torch.cuda.is_available():
-        warnings.warn("CUDA requested but not available, falling back to CPU")
+        warnings.warn("CUDA requested but not available, falling back to CPU", stacklevel=2)
         return "cpu"
     return device
 
@@ -129,6 +129,10 @@ def train_corpus(corpus_npy: str,
                  hidden_dim: int = 1024,
                  commitment_beta: float = 0.25,
                  embedding_model: Optional[str] = None,
+                 quantizer: str = "pq",
+                 use_rotation: bool = False,
+                 rank_weight: float = 0.0,
+                 store_embeddings: bool = True,
                  latent_bits: Optional[int] = None) -> str:
     """Train a product-quantized VQ-VAE on a corpus of embeddings.
 
@@ -147,6 +151,15 @@ def train_corpus(corpus_npy: str,
         commitment_beta: VQ commitment loss weight.
         embedding_model: Recorded in metadata so the index knows which
             sentence-transformers model produced the corpus.
+        quantizer: 'pq' (product quantization) or 'rq' (residual
+            quantization; usually more accurate at the same byte budget).
+        use_rotation: Learn an OPQ-style orthogonal rotation before
+            quantization.
+        rank_weight: Weight of the order-preserving ranking loss (0
+            disables it).
+        store_embeddings: Also save the corpus as float16
+            (embeddings.f16.npy) so searches can rerank against the
+            originals.
         latent_bits: Deprecated pre-v3 parameter; mapped to an equivalent
             number of subquantizers with a warning.
 
@@ -159,7 +172,7 @@ def train_corpus(corpus_npy: str,
         warnings.warn(
             f"latent_bits is deprecated; using num_subquantizers="
             f"{num_subquantizers} ({num_subquantizers * 8} bits/doc) instead",
-            DeprecationWarning,
+            DeprecationWarning, stacklevel=2,
         )
 
     if not os.path.exists(corpus_npy):
@@ -181,18 +194,26 @@ def train_corpus(corpus_npy: str,
         num_subquantizers=num_subquantizers,
         codes_per_subquantizer=codes_per_subquantizer,
         beta=commitment_beta,
+        quantizer=quantizer,
+        use_rotation=use_rotation,
+        rank_weight=rank_weight,
     )
     bytes_per_doc = model.codes_dtype.itemsize * num_subquantizers
     print(
-        f"Training VQ-VAE: latent_dim={model.lat_dim}, M={num_subquantizers}, "
-        f"K={codes_per_subquantizer} -> {bytes_per_doc} bytes/doc "
-        f"(vs {input_dim * 4} bytes float32)"
+        f"Training VQ-VAE ({quantizer.upper()}): latent_dim={model.lat_dim}, "
+        f"M={num_subquantizers}, K={codes_per_subquantizer} -> "
+        f"{bytes_per_doc} bytes/doc (vs {input_dim * 4} bytes float32)"
     )
 
     _train_loop(model, dl, epochs, device, learning_rate)
 
     torch.save(model.state_dict(), output_dir / "vqvae.pt")
     n_docs = _compress(model, dl, output_dir / "codes.npy", device)
+
+    if store_embeddings:
+        corpus = np.load(corpus_npy, mmap_mode="r")
+        np.save(output_dir / "embeddings.f16.npy",
+                np.asarray(corpus, dtype=np.float16))
 
     from .embedding import DEFAULT_EMBEDDING_MODEL
     meta = {

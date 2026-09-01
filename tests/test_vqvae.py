@@ -5,9 +5,9 @@ import pytest
 import torch
 
 from vecman.models.vqvae import (
+    VQVAE,
     EMAVectorQuantizer,
     ProductQuantizer,
-    VQVAE,
     codes_dtype,
     default_latent_dim,
 )
@@ -100,7 +100,8 @@ def test_vqvae_config_roundtrip():
     clone = VQVAE.from_config(model.config())
     clone.load_state_dict(model.state_dict())
     x = torch.randn(3, DIM)
-    model.eval(); clone.eval()
+    model.eval()
+    clone.eval()
     assert np.array_equal(model.compress(x), clone.compress(x))
 
 

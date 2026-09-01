@@ -42,7 +42,7 @@ def test_stream_dataset_validates(tmp_path, corpus):
 
 def test_train_corpus_artifacts(tmp_path, corpus):
     path, vectors = corpus
-    out = train_corpus(
+    train_corpus(
         str(path), input_dim=DIM, epochs=2, num_subquantizers=4,
         codes_per_subquantizer=16, batch_size=32, device="cpu",
         output_dir=str(tmp_path / "model"), hidden_dim=64,

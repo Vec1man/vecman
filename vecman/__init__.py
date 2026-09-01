@@ -15,8 +15,15 @@ Quick start::
     results = index.search("my query", k=5, filter={"lang": "en"})
 """
 
+from .core.bm25 import BM25
+from .core.hnsw import HNSW
 from .core.index import SearchResult, VecmanIndex
-from .models.vqvae import VQVAE, ProductQuantizer, EMAVectorQuantizer
+from .models.vqvae import (
+    VQVAE,
+    EMAVectorQuantizer,
+    ProductQuantizer,
+    ResidualQuantizer,
+)
 from .rag import generate_answer
 from .utils.embedding import embed_texts, get_embedder
 from .utils.retrieval import (
@@ -28,14 +35,17 @@ from .utils.retrieval import (
 )
 from .utils.training import train_corpus
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"
 
 __all__ = [
     "VQVAE",
     "ProductQuantizer",
+    "ResidualQuantizer",
     "EMAVectorQuantizer",
     "VecmanIndex",
     "SearchResult",
+    "HNSW",
+    "BM25",
     "train_corpus",
     "embed_texts",
     "get_embedder",

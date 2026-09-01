@@ -73,6 +73,8 @@ def cmd_index(args: argparse.Namespace) -> int:
         device=args.device,
         output_dir=str(out_dir),
         embedding_model=args.embedding_model,
+        quantizer=args.quantizer,
+        use_rotation=args.rotation,
     )
 
     index = VecmanIndex.load(out_dir)
@@ -85,7 +87,8 @@ def cmd_query(args: argparse.Namespace) -> int:
 
     index = VecmanIndex.load(args.dir)
     filter_dict = json.loads(args.filter) if args.filter else None
-    results = index.search(args.query, k=args.k, filter=filter_dict)
+    results = index.search(args.query, k=args.k, filter=filter_dict,
+                           rerank=args.rerank, hybrid=args.hybrid)
     if not results:
         print("(no results)")
         return 0
@@ -101,9 +104,15 @@ def cmd_serve(args: argparse.Namespace) -> int:
     """Serve an index over HTTP using only the standard library.
 
     Endpoints:
-        GET /search?q=<text>&k=<int>   -> {"results": [{id, text, score, metadata}]}
-        GET /info                      -> index metadata
-        GET /health                    -> {"status": "ok"}
+        GET  /search?q=<text>&k=<int>&rerank=1&hybrid=1
+                                       -> {"results": [{id, text, score, metadata}]}
+        POST /search  {"queries": [...], "k": 5, "filter": {...}, "rerank": false}
+                                       -> {"results": [[...], ...]}  (batched)
+        POST /add     {"texts": [...], "metadatas": [...]} -> {"ids": [...]}
+        POST /delete  {"ids": [...]}   -> {"removed": n}
+        POST /save    {}               -> {"saved": true}
+        GET  /info                     -> index metadata
+        GET  /health                   -> {"status": "ok"}
     """
     import urllib.parse
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -113,6 +122,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
     index = VecmanIndex.load(args.dir)
     index._ensure_latents()  # decompress once, before serving traffic
     print(f"Loaded index with {len(index)} documents from {args.dir}")
+
+    def _serialize(results) -> list:
+        return [
+            {"id": r.id, "text": r.text, "score": r.score,
+             "metadata": r.metadata}
+            for r in results
+        ]
 
     class Handler(BaseHTTPRequestHandler):
         def _send(self, status: int, payload: dict) -> None:
@@ -139,17 +155,59 @@ def cmd_serve(args: argparse.Namespace) -> int:
                     return
                 try:
                     k = int((params.get("k") or ["5"])[0])
-                    results = index.search(query, k=k)
-                except (ValueError, RuntimeError) as e:
+                    rerank = (params.get("rerank") or ["0"])[0] == "1"
+                    hybrid = (params.get("hybrid") or ["0"])[0] == "1"
+                    results = index.search(query, k=k, rerank=rerank,
+                                           hybrid=hybrid)
+                except (ValueError, RuntimeError, KeyError) as e:
                     self._send(400, {"error": str(e)})
                     return
-                self._send(200, {"results": [
-                    {"id": r.id, "text": r.text, "score": r.score,
-                     "metadata": r.metadata}
-                    for r in results
-                ]})
+                self._send(200, {"results": _serialize(results)})
                 return
             self._send(404, {"error": f"unknown path {parsed.path}"})
+
+        def _read_json(self) -> dict:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0:
+                return {}
+            return json.loads(self.rfile.read(length).decode("utf-8"))
+
+        def do_POST(self) -> None:  # noqa: N802 (stdlib naming)
+            parsed = urllib.parse.urlparse(self.path)
+            try:
+                body = self._read_json()
+            except (ValueError, json.JSONDecodeError) as e:
+                self._send(400, {"error": f"invalid JSON body: {e}"})
+                return
+            try:
+                if parsed.path == "/search":
+                    queries = body.get("queries") or []
+                    if not queries:
+                        self._send(400, {"error": "missing 'queries' list"})
+                        return
+                    batches = index.search_batch(
+                        queries, k=int(body.get("k", 5)),
+                        filter=body.get("filter"),
+                        rerank=bool(body.get("rerank", False)),
+                    )
+                    self._send(200, {"results": [_serialize(b) for b in batches]})
+                elif parsed.path == "/add":
+                    texts = body.get("texts") or []
+                    if not texts:
+                        self._send(400, {"error": "missing 'texts' list"})
+                        return
+                    ids = index.add_texts(texts, metadatas=body.get("metadatas"))
+                    self._send(200, {"ids": ids})
+                elif parsed.path == "/delete":
+                    removed = index.delete([int(i) for i in body.get("ids", [])])
+                    self._send(200, {"removed": removed})
+                elif parsed.path == "/save":
+                    index.save(args.dir)
+                    self._send(200, {"saved": True})
+                else:
+                    self._send(404, {"error": f"unknown path {parsed.path}"})
+            except (ValueError, RuntimeError, KeyError) as e:
+                self._send(400, {"error": str(e)})
 
         def log_message(self, fmt: str, *log_args) -> None:
             print(f"{self.address_string()} - {fmt % log_args}")
@@ -191,6 +249,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_index.add_argument("--subquantizers", type=int, default=8, help="PQ subspaces (bytes per document)")
     p_index.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
     p_index.add_argument("--embedding-model", default="all-MiniLM-L6-v2")
+    p_index.add_argument("--quantizer", default="pq", choices=["pq", "rq"],
+                         help="pq: subspace codebooks; rq: residual stages")
+    p_index.add_argument("--rotation", action="store_true",
+                         help="learn an OPQ-style rotation before quantization")
     p_index.set_defaults(func=cmd_index)
 
     p_query = sub.add_parser("query", help="search an index")
@@ -198,6 +260,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_query.add_argument("-d", "--dir", default="vecman_index", help="index directory")
     p_query.add_argument("-k", type=int, default=5)
     p_query.add_argument("--filter", help='metadata filter as JSON, e.g. \'{"lang": "en"}\'')
+    p_query.add_argument("--rerank", action="store_true",
+                         help="rerank against stored original embeddings")
+    p_query.add_argument("--hybrid", action="store_true",
+                         help="fuse BM25 keyword scores with dense scores")
     p_query.set_defaults(func=cmd_query)
 
     p_info = sub.add_parser("info", help="show index metadata")

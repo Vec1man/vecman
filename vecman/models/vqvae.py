@@ -17,8 +17,8 @@ from typing import Optional, Tuple
 
 import numpy as np
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 
 
 def codes_dtype(codes_per_subquantizer: int) -> np.dtype:
@@ -150,11 +150,77 @@ class ProductQuantizer(nn.Module):
         """Codes (B, M) -> reconstructed latents (B, code_dim)."""
         if idx.dim() == 1:
             idx = idx.unsqueeze(0)
+        idx = idx.to(self.quantizers[0].codebook.device)
         parts = [
             q.codebook[idx[:, m].long()]
             for m, q in enumerate(self.quantizers)
         ]
         return torch.cat(parts, dim=1)
+
+
+class ResidualQuantizer(nn.Module):
+    """Residual quantizer (RQ): L stages of full-dimension codebooks, each
+    quantizing the residual left by the previous stage.
+
+    Compared to product quantization at the same byte budget, RQ usually
+    reconstructs more accurately because every stage sees the whole vector,
+    and the codes are hierarchical: a prefix of the codes is already a
+    coarse approximation of the latent.
+    """
+
+    def __init__(self, code_dim: int, num_stages: int = 8,
+                 codes_per_stage: int = 256, beta: float = 0.25,
+                 decay: float = 0.99):
+        super().__init__()
+        if num_stages <= 0:
+            raise ValueError(f"num_stages must be positive, got {num_stages}")
+        self.code_dim = code_dim
+        self.num_subquantizers = num_stages  # storage width, like PQ's M
+        self.codes_per_subquantizer = codes_per_stage
+        self.beta = beta
+        self.quantizers = nn.ModuleList(
+            EMAVectorQuantizer(codes_per_stage, code_dim, beta, decay)
+            for _ in range(num_stages)
+        )
+
+    def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        residual = z.detach()
+        hard = torch.zeros_like(z)
+        idxs = []
+        for quantizer in self.quantizers:
+            idx = quantizer.nearest(residual)
+            entry = quantizer.codebook[idx]
+            if self.training:
+                quantizer._ema_update(residual, idx)
+                quantizer._reinit_dead_codes(residual)
+            hard = hard + entry
+            residual = residual - entry
+            idxs.append(idx)
+        commitment_loss = F.mse_loss(z, hard.detach())
+        loss = self.beta * commitment_loss
+        z_q = z + (hard - z).detach()  # straight-through
+        return z_q, torch.stack(idxs, dim=1), loss
+
+    @torch.no_grad()
+    def encode_indices(self, z: torch.Tensor) -> torch.Tensor:
+        residual = z
+        idxs = []
+        for quantizer in self.quantizers:
+            idx = quantizer.nearest(residual)
+            residual = residual - quantizer.codebook[idx]
+            idxs.append(idx)
+        return torch.stack(idxs, dim=1)
+
+    @torch.no_grad()
+    def decode_indices(self, idx: torch.Tensor) -> torch.Tensor:
+        if idx.dim() == 1:
+            idx = idx.unsqueeze(0)
+        idx = idx.to(self.quantizers[0].codebook.device)
+        out = torch.zeros(idx.shape[0], self.code_dim,
+                          device=self.quantizers[0].codebook.device)
+        for stage, quantizer in enumerate(self.quantizers):
+            out = out + quantizer.codebook[idx[:, stage].long()]
+        return out
 
 
 def _mlp(d_in: int, hidden: int, d_out: int) -> nn.Sequential:
@@ -198,6 +264,16 @@ class VQVAE(nn.Module):
             of the inputs. Without it the encoder can satisfy reconstruction
             while collapsing all latents onto one direction, destroying
             retrieval quality.
+        rank_weight: Weight of an order-preserving ranking loss: sampled
+            triplets are penalized when the latent-space similarity ordering
+            contradicts a confident input-space ordering. Sharpens top-k
+            retrieval beyond what pure similarity matching gives.
+        quantizer: 'pq' (product quantization, subspace codebooks) or 'rq'
+            (residual quantization, staged full-dimension codebooks —
+            usually more accurate at the same byte budget).
+        use_rotation: Learn an orthogonal rotation of the latent before
+            quantization (OPQ-style), spreading variance evenly across PQ
+            subspaces. Off by default for checkpoint compatibility.
     """
 
     def __init__(self, input_dim: int, hidden: int = 1024,
@@ -205,7 +281,10 @@ class VQVAE(nn.Module):
                  num_subquantizers: int = 8,
                  codes_per_subquantizer: int = 256,
                  beta: float = 0.25,
-                 sim_weight: float = 1.0):
+                 sim_weight: float = 1.0,
+                 rank_weight: float = 0.0,
+                 quantizer: str = "pq",
+                 use_rotation: bool = False):
         super().__init__()
         if input_dim <= 0:
             raise ValueError(f"input_dim must be positive, got {input_dim}")
@@ -215,9 +294,11 @@ class VQVAE(nn.Module):
             raise ValueError(
                 f"codes_per_subquantizer must be > 1, got {codes_per_subquantizer}"
             )
+        if quantizer not in ("pq", "rq"):
+            raise ValueError(f"quantizer must be 'pq' or 'rq', got {quantizer!r}")
         if latent_dim is None:
             latent_dim = default_latent_dim(input_dim, num_subquantizers)
-        if latent_dim % num_subquantizers != 0:
+        if quantizer == "pq" and latent_dim % num_subquantizers != 0:
             raise ValueError(
                 f"latent_dim ({latent_dim}) must be divisible by "
                 f"num_subquantizers ({num_subquantizers})"
@@ -229,6 +310,9 @@ class VQVAE(nn.Module):
         self.num_subquantizers = num_subquantizers
         self.codes_per_subquantizer = codes_per_subquantizer
         self.sim_weight = sim_weight
+        self.rank_weight = rank_weight
+        self.quantizer_type = quantizer
+        self.use_rotation = use_rotation
 
         self.encoder = _mlp(input_dim, hidden, latent_dim)
         # Center/scale each latent dimension before quantization. Without
@@ -236,9 +320,22 @@ class VQVAE(nn.Module):
         # nearest-code assignment and collapses most documents onto the
         # same codes.
         self.pre_vq_norm = nn.BatchNorm1d(latent_dim, affine=False)
-        self.vq = ProductQuantizer(
-            latent_dim, num_subquantizers, codes_per_subquantizer, beta
-        )
+        if use_rotation:
+            # OPQ-style learned orthogonal rotation, spreading variance
+            # across quantizer subspaces. Parametrized to stay orthogonal.
+            self.rotation = torch.nn.utils.parametrizations.orthogonal(
+                nn.Linear(latent_dim, latent_dim, bias=False)
+            )
+        else:
+            self.rotation = None
+        if quantizer == "rq":
+            self.vq = ResidualQuantizer(
+                latent_dim, num_subquantizers, codes_per_subquantizer, beta
+            )
+        else:
+            self.vq = ProductQuantizer(
+                latent_dim, num_subquantizers, codes_per_subquantizer, beta
+            )
         self.decoder = _mlp(latent_dim, hidden, input_dim)
 
     @property
@@ -253,12 +350,17 @@ class VQVAE(nn.Module):
                 f"Input dimension {x.shape[1]} doesn't match expected {self.input_dim}"
             )
         z = self.pre_vq_norm(self.encoder(x))
+        if self.rotation is not None:
+            z = self.rotation(z)
         z_q, idx, vq_loss = self.vq(z)
         recon = self.decoder(z_q)
         recon_loss = F.mse_loss(recon, x)
         total_loss = recon_loss + vq_loss
-        if self.sim_weight > 0 and x.shape[0] > 1:
-            total_loss = total_loss + self.sim_weight * self._similarity_loss(x, z)
+        if x.shape[0] > 1:
+            if self.sim_weight > 0:
+                total_loss = total_loss + self.sim_weight * self._similarity_loss(x, z)
+            if self.rank_weight > 0:
+                total_loss = total_loss + self.rank_weight * self._ranking_loss(x, z)
         return recon, idx, total_loss, recon_loss
 
     @staticmethod
@@ -273,6 +375,34 @@ class VQVAE(nn.Module):
         z_n = F.normalize(z - z.mean(dim=0, keepdim=True), dim=1, eps=1e-8)
         return F.mse_loss(z_n @ z_n.t(), x_n @ x_n.t())
 
+    @staticmethod
+    def _ranking_loss(x: torch.Tensor, z: torch.Tensor,
+                      margin: float = 0.05,
+                      confidence: float = 0.1) -> torch.Tensor:
+        """Order-preserving triplet loss on sampled pairs.
+
+        For each anchor, two random other points are compared: when the
+        input space says one is clearly closer than the other (difference
+        above `confidence`), the latent space is penalized unless it agrees
+        with at least `margin`. This targets top-k ordering directly, which
+        the pairwise MSE of the similarity loss only optimizes on average.
+        """
+        x_n = F.normalize(x - x.mean(dim=0, keepdim=True), dim=1, eps=1e-8)
+        z_n = F.normalize(z - z.mean(dim=0, keepdim=True), dim=1, eps=1e-8)
+        sx = x_n @ x_n.t()
+        sz = z_n @ z_n.t()
+        batch = x.shape[0]
+        anchor = torch.arange(batch, device=x.device)
+        first = torch.randint(0, batch, (batch,), device=x.device)
+        second = torch.randint(0, batch, (batch,), device=x.device)
+        diff_x = sx[anchor, first] - sx[anchor, second]
+        diff_z = sz[anchor, first] - sz[anchor, second]
+        confident = diff_x.abs() > confidence
+        if not confident.any():
+            return z.new_zeros(())
+        violation = F.relu(margin - torch.sign(diff_x) * diff_z)
+        return violation[confident].mean()
+
     @torch.no_grad()
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         """Embeddings (B, input_dim) -> continuous latents (B, lat_dim).
@@ -284,7 +414,10 @@ class VQVAE(nn.Module):
         was_training = self.training
         self.eval()
         try:
-            return self.pre_vq_norm(self.encoder(x))
+            z = self.pre_vq_norm(self.encoder(x))
+            if self.rotation is not None:
+                z = self.rotation(z)
+            return z
         finally:
             self.train(was_training)
 
@@ -309,6 +442,9 @@ class VQVAE(nn.Module):
             "num_subquantizers": self.num_subquantizers,
             "codes_per_subquantizer": self.codes_per_subquantizer,
             "sim_weight": self.sim_weight,
+            "rank_weight": self.rank_weight,
+            "quantizer": self.quantizer_type,
+            "use_rotation": self.use_rotation,
         }
 
     @classmethod
@@ -320,4 +456,7 @@ class VQVAE(nn.Module):
             num_subquantizers=meta.get("num_subquantizers", 8),
             codes_per_subquantizer=meta.get("codes_per_subquantizer", 256),
             sim_weight=meta.get("sim_weight", 1.0),
+            rank_weight=meta.get("rank_weight", 0.0),
+            quantizer=meta.get("quantizer", "pq"),
+            use_rotation=meta.get("use_rotation", False),
         )

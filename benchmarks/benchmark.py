@@ -50,6 +50,9 @@ def main() -> None:
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--queries", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=1024)
+    parser.add_argument("--quantizer", default="pq", choices=["pq", "rq"])
+    parser.add_argument("--rank-weight", type=float, default=0.0)
+    parser.add_argument("--rotation", action="store_true")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--out", default="benchmark_results.json")
     args = parser.parse_args()
@@ -65,6 +68,8 @@ def main() -> None:
         str(work / "corpus.npy"), input_dim=args.dim, epochs=args.epochs,
         num_subquantizers=args.subquantizers, device=args.device,
         output_dir=str(work), batch_size=args.batch_size,
+        quantizer=args.quantizer, rank_weight=args.rank_weight,
+        use_rotation=args.rotation,
     )
     train_time = time.perf_counter() - t0
 
@@ -84,18 +89,25 @@ def main() -> None:
         size=(args.queries, args.dim)
     ).astype(np.float32) * 0.1
 
-    recalls, compressed_times, exact_times = [], [], []
+    recalls, rerank_recalls, adc_recalls = [], [], []
+    compressed_times, rerank_times, exact_times = [], [], []
     for q in queries:
         t0 = time.perf_counter()
         truth = set(exact_topk(corpus, q, args.k).tolist())
         exact_times.append(time.perf_counter() - t0)
 
         t0 = time.perf_counter()
-        results = index.search(q, k=args.k)
+        results = index.search(q, k=args.k, method="latent")
         compressed_times.append(time.perf_counter() - t0)
+        recalls.append(len(truth & {r.id for r in results}) / args.k)
 
-        hits = truth & {r.id for r in results}
-        recalls.append(len(hits) / args.k)
+        adc = index.search(q, k=args.k, method="adc")
+        adc_recalls.append(len(truth & {r.id for r in adc}) / args.k)
+
+        t0 = time.perf_counter()
+        reranked = index.search(q, k=args.k, rerank=True)
+        rerank_times.append(time.perf_counter() - t0)
+        rerank_recalls.append(len(truth & {r.id for r in reranked}) / args.k)
 
     bytes_per_doc = index.codes.dtype.itemsize * index.codes.shape[1]
     raw_bytes = args.dim * 4
@@ -103,11 +115,15 @@ def main() -> None:
         "n_docs": args.n,
         "dim": args.dim,
         "k": args.k,
-        "recall_at_k": float(np.mean(recalls)),
+        "quantizer": args.quantizer,
+        "recall_at_k_compressed": float(np.mean(recalls)),
+        "recall_at_k_adc": float(np.mean(adc_recalls)),
+        "recall_at_k_reranked": float(np.mean(rerank_recalls)),
         "bytes_per_doc_compressed": bytes_per_doc,
         "bytes_per_doc_raw_float32": raw_bytes,
         "compression_ratio": raw_bytes / bytes_per_doc,
         "avg_query_ms_compressed": float(np.mean(compressed_times) * 1000),
+        "avg_query_ms_reranked": float(np.mean(rerank_times) * 1000),
         "avg_query_ms_exact": float(np.mean(exact_times) * 1000),
         "train_seconds": train_time,
     }

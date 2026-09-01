@@ -1,5 +1,7 @@
-"""VECMAN core: the compressed vector index."""
+"""VECMAN core: the compressed vector index and its search structures."""
 
-from .index import VecmanIndex, SearchResult
+from .bm25 import BM25
+from .hnsw import HNSW
+from .index import SearchResult, VecmanIndex
 
-__all__ = ["VecmanIndex", "SearchResult"]
+__all__ = ["VecmanIndex", "SearchResult", "HNSW", "BM25"]

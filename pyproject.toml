@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vecman"
-version = "3.0.0"
+version = "3.1.0"
 description = "Learned embedding compression and compressed vector search (product-quantized VQ-VAE)"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -44,3 +44,11 @@ include = ["vecman*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+ignore = ["E501", "B008"]
