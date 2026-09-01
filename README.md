@@ -77,6 +77,8 @@ Or from the command line:
 vecman index docs.txt -o my_index --epochs 10
 vecman query "what is machine learning" -d my_index -k 5
 vecman info -d my_index
+vecman serve -d my_index -p 8080   # REST API, stdlib only
+# GET /search?q=...&k=5   GET /info   GET /health
 ```
 
 ## RAG in one call

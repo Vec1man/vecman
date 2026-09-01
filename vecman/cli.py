@@ -5,6 +5,7 @@ Usage::
     vecman index docs.txt -o my_index --epochs 10 --device cpu
     vecman query "what is machine learning" -d my_index -k 5
     vecman info -d my_index
+    vecman serve -d my_index -p 8080   # REST API (stdlib, no extra deps)
 """
 
 import argparse
@@ -96,6 +97,74 @@ def cmd_query(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    """Serve an index over HTTP using only the standard library.
+
+    Endpoints:
+        GET /search?q=<text>&k=<int>   -> {"results": [{id, text, score, metadata}]}
+        GET /info                      -> index metadata
+        GET /health                    -> {"status": "ok"}
+    """
+    import urllib.parse
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from .core.index import VecmanIndex
+
+    index = VecmanIndex.load(args.dir)
+    index._ensure_latents()  # decompress once, before serving traffic
+    print(f"Loaded index with {len(index)} documents from {args.dir}")
+
+    class Handler(BaseHTTPRequestHandler):
+        def _send(self, status: int, payload: dict) -> None:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:  # noqa: N802 (stdlib naming)
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/health":
+                self._send(200, {"status": "ok"})
+                return
+            if parsed.path == "/info":
+                self._send(200, {"documents": len(index), **index.model.config()})
+                return
+            if parsed.path == "/search":
+                params = urllib.parse.parse_qs(parsed.query)
+                query = (params.get("q") or [""])[0]
+                if not query.strip():
+                    self._send(400, {"error": "missing query parameter 'q'"})
+                    return
+                try:
+                    k = int((params.get("k") or ["5"])[0])
+                    results = index.search(query, k=k)
+                except (ValueError, RuntimeError) as e:
+                    self._send(400, {"error": str(e)})
+                    return
+                self._send(200, {"results": [
+                    {"id": r.id, "text": r.text, "score": r.score,
+                     "metadata": r.metadata}
+                    for r in results
+                ]})
+                return
+            self._send(404, {"error": f"unknown path {parsed.path}"})
+
+        def log_message(self, fmt: str, *log_args) -> None:
+            print(f"{self.address_string()} - {fmt % log_args}")
+
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    print(f"Serving on http://{args.host}:{args.port}  (Ctrl+C to stop)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
 def cmd_info(args: argparse.Namespace) -> int:
     meta_path = Path(args.dir) / "vqvae_meta.json"
     if not meta_path.exists():
@@ -134,6 +203,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_info = sub.add_parser("info", help="show index metadata")
     p_info.add_argument("-d", "--dir", default="vecman_index")
     p_info.set_defaults(func=cmd_info)
+
+    p_serve = sub.add_parser("serve", help="serve an index over a REST API")
+    p_serve.add_argument("-d", "--dir", default="vecman_index", help="index directory")
+    p_serve.add_argument("-p", "--port", type=int, default=8080)
+    p_serve.add_argument("--host", default="127.0.0.1")
+    p_serve.set_defaults(func=cmd_serve)
 
     return parser
 
