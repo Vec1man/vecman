@@ -60,7 +60,7 @@ def _train_loop(model: VQVAE, loader: DataLoader, epochs: int, device: str, lear
     
     opt = optim.Adam(model.parameters(), lr=learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        opt, mode='min', factor=0.8, patience=2, verbose=True
+        opt, mode='min', factor=0.8, patience=2
     )
     
     best_loss = float('inf')
