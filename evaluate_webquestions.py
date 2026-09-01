@@ -18,15 +18,15 @@ from tqdm.auto import tqdm
 from datasets import load_dataset, Dataset
 import torch
 
-# VECMAN imports
+# VECMAN imports (v3 API)
 from vecman import (
-    VQVAE, 
-    train_corpus, 
-    embed_texts, 
-    save_jsonl, 
-    load_assets, 
-    retrieve, 
-    generate_answer
+    VecmanIndex,
+    train_corpus,
+    embed_texts,
+    save_jsonl,
+    load_assets,
+    retrieve,
+    generate_answer,
 )
 
 # RAGAS imports
@@ -309,17 +309,13 @@ class WebQuestionsEvaluator:
             List of dictionaries with question and ground_truth
         """
         print(f"📋 Selecting {num_questions} questions from Web Questions dataset...")
-        
-        # Use test split if available, otherwise use a different portion of the dataset
-        try:
-            # Try to load test split
-            test_dataset = load_dataset("stanfordnlp/web_questions", split="train")
-            eval_source = test_dataset
-            print("📊 Using test split for evaluation")
-        except:
-            # If no test split, use the end portion of train split
-            eval_source = dataset
-            print("📊 Using portion of train split for evaluation")
+
+        # IMPORTANT: evaluation questions come from the held-out *test* split.
+        # The corpus is built from the train split, so evaluating on train
+        # questions would leak the answers into the retrieved context.
+        test_dataset = load_dataset("stanfordnlp/web_questions", split="test")
+        eval_source = test_dataset
+        print("📊 Using held-out test split for evaluation")
         
         # Select questions for evaluation
         num_available = len(eval_source)
@@ -482,10 +478,10 @@ def main():
     print("=" * 60)
     
     # Configuration
-    MAX_SAMPLES = None  # Use full dataset for corpus building
+    MAX_SAMPLES = None   # Use full train split for corpus building
     EPOCHS = 30
-    K_RETRIEVE = 50  # Top 10 relevant contexts
-    NUM_QUESTIONS = 10  # Use 100 questions from dataset
+    K_RETRIEVE = 5       # Contexts retrieved per question
+    NUM_QUESTIONS = 100  # Held-out test questions to evaluate
     
     # Initialize evaluator
     evaluator = WebQuestionsEvaluator()

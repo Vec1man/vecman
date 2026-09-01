@@ -16,3 +16,11 @@ dist/
 *.pyo
 *.pyd
 *.exe
+# Environment and local artifacts
+.env
+benchmark_work/
+benchmark_results.json
+example_index/
+vecman_index/
+webquestions_models/
+.pytest_cache/

@@ -1,10 +1,5 @@
-"""VECMAN VQ-VAE model implementations."""
+"""VECMAN model implementations."""
 
-from .vqvae import VQVAE, VectorQuantizer, Encoder, Decoder
+from .vqvae import VQVAE, ProductQuantizer, EMAVectorQuantizer, codes_dtype
 
-__all__ = [
-    "VQVAE",
-    "VectorQuantizer", 
-    "Encoder",
-    "Decoder"
-] 
+__all__ = ["VQVAE", "ProductQuantizer", "EMAVectorQuantizer", "codes_dtype"]

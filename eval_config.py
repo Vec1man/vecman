@@ -17,8 +17,9 @@ DEVICE = "cuda"  # "cuda" or "cpu"
 MODEL_DIR = "vecman_models"
 
 # Training Configuration
-EPOCHS = 5
-LATENT_BITS = 16  # VQ-VAE latent bits
+EPOCHS = 10
+NUM_SUBQUANTIZERS = 8       # PQ subspaces (bytes per document at K<=256)
+CODES_PER_SUBQUANTIZER = 256
 BATCH_SIZE = 4096
 
 # Retrieval Configuration
@@ -75,7 +76,8 @@ def get_config():
         },
         "training": {
             "epochs": EPOCHS,
-            "latent_bits": LATENT_BITS,
+            "num_subquantizers": NUM_SUBQUANTIZERS,
+            "codes_per_subquantizer": CODES_PER_SUBQUANTIZER,
             "batch_size": BATCH_SIZE
         },
         "retrieval": {

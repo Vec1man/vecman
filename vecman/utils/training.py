@@ -1,9 +1,11 @@
-"""VECMAN training utilities for VQ-VAE model."""
+"""VECMAN training utilities for the product-quantized VQ-VAE."""
 
+import copy
 import json
 import os
+import warnings
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 import numpy as np
 import torch
@@ -13,233 +15,197 @@ from tqdm import tqdm
 
 from ..models.vqvae import VQVAE
 
+
 class NPZStreamDataset(IterableDataset):
+    """Streams batches from a .npy embedding matrix via memory-mapping, so
+    corpora far larger than RAM can be trained on."""
+
     def __init__(self, np_file: str, batch_size: int, input_dim: int):
         super().__init__()
         self.path = Path(np_file)
         self.bs = batch_size
-        self._file = None
         self.d = input_dim
-        
-        # Validate file exists
+
         if not self.path.exists():
             raise FileNotFoundError(f"Corpus file not found: {self.path}")
-        
-        # Validate the numpy file can be loaded
-        try:
-            test_load = np.load(self.path, mmap_mode="r")
-            if test_load.shape[1] != input_dim:
-                raise ValueError(
-                    f"Corpus dimension {test_load.shape[1]} doesn't match "
-                    f"expected input_dim {input_dim}"
-                )
-        except Exception as e:
-            raise ValueError(f"Invalid corpus file {self.path}: {e}")
-    
+        arr = np.load(self.path, mmap_mode="r")
+        if arr.ndim != 2 or arr.shape[1] != input_dim:
+            raise ValueError(
+                f"Corpus {self.path} has shape {arr.shape}, expected (N, {input_dim})"
+            )
+
     def __iter__(self):
-        if self._file is None:
-            self._file = np.load(self.path, mmap_mode="r")
-        idx, N = 0, self._file.shape[0]
-        while idx < N:
-            batch = self._file[idx:idx + self.bs]
-            # Ensure batch is float32 and handle any NaN values
-            batch = np.nan_to_num(batch, nan=0.0, posinf=1.0, neginf=-1.0)
-            yield torch.from_numpy(batch).float()
+        arr = np.load(self.path, mmap_mode="r")
+        idx, n = 0, arr.shape[0]
+        while idx < n:
+            batch = np.nan_to_num(
+                arr[idx:idx + self.bs], nan=0.0, posinf=1.0, neginf=-1.0
+            )
+            yield torch.from_numpy(np.ascontiguousarray(batch)).float()
             idx += self.bs
 
-def _train_loop(model: VQVAE, loader: DataLoader, epochs: int, device: str, learning_rate: float = 3e-4):
-    """Internal training loop for VQ-VAE model."""
-    # Validate device
+
+def resolve_device(device: str) -> str:
     if device == "cuda" and not torch.cuda.is_available():
-        print("⚠️ CUDA requested but not available, falling back to CPU")
-        device = "cpu"
-    
-    print(f"🚀 Training on device: {device}")
+        warnings.warn("CUDA requested but not available, falling back to CPU")
+        return "cpu"
+    return device
+
+
+def _train_loop(model: VQVAE, loader: DataLoader, epochs: int, device: str,
+                learning_rate: float = 1e-3) -> dict:
+    """Train the model in place; returns the best (lowest-loss) state dict."""
+    device = resolve_device(device)
     model.to(device)
     model.train()
-    
+
     opt = optim.Adam(model.parameters(), lr=learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        opt, mode='min', factor=0.8, patience=2
+        opt, mode="min", factor=0.8, patience=2
     )
-    
-    best_loss = float('inf')
-    
+
+    best_loss = float("inf")
+    best_state = copy.deepcopy(model.state_dict())
+
     for ep in range(1, epochs + 1):
-        epoch_loss = 0.0
-        num_batches = 0
-        
+        epoch_loss, num_samples = 0.0, 0
         with tqdm(loader, desc=f"Epoch {ep}/{epochs}") as pbar:
             for batch in pbar:
-                try:
-                    batch = batch.to(device)
-                    
-                    # Forward pass
-                    _, _, total_loss, recon_loss = model(batch)
-                    
-                    # Backward pass
-                    opt.zero_grad()
-                    total_loss.backward()
-                    
-                    # Gradient clipping to prevent explosion
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    
-                    opt.step()
-                    
-                    # Track metrics
-                    loss_val = total_loss.item()
-                    recon_val = recon_loss.item()
-                    epoch_loss += loss_val * len(batch)
-                    num_batches += len(batch)
-                    
-                    # Update progress bar
-                    pbar.set_postfix({
-                        'loss': f'{loss_val:.4f}',
-                        'recon': f'{recon_val:.4f}',
-                        'lr': f'{opt.param_groups[0]["lr"]:.2e}'
-                    })
-                    
-                except Exception as e:
-                    print(f"⚠️ Error in batch: {e}")
-                    continue
-        
-        # Calculate average epoch loss
-        if num_batches > 0:
-            avg_loss = epoch_loss / num_batches
-            print(f"Epoch {ep}/{epochs} - avg_loss: {avg_loss:.4f}")
-            
-            # Update learning rate scheduler
-            scheduler.step(avg_loss)
-            
-            # Track best model
-            if avg_loss < best_loss:
-                best_loss = avg_loss
-                print(f"🎯 New best loss: {best_loss:.4f}")
-        else:
-            print(f"⚠️ No valid batches processed in epoch {ep}")
+                batch = batch.to(device)
+                _, _, total_loss, recon_loss = model(batch)
+                opt.zero_grad()
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                opt.step()
 
-def _compress(model: VQVAE, loader: DataLoader, out_path: str, device: str):
-    """Compress the dataset using trained VQ-VAE model."""
-    print(f"🗜️ Compressing dataset...")
-    
-    # Validate device
-    if device == "cuda" and not torch.cuda.is_available():
-        device = "cpu"
-    
+                loss_val = total_loss.item()
+                epoch_loss += loss_val * len(batch)
+                num_samples += len(batch)
+                pbar.set_postfix({
+                    "loss": f"{loss_val:.4f}",
+                    "recon": f"{recon_loss.item():.4f}",
+                    "lr": f'{opt.param_groups[0]["lr"]:.2e}',
+                })
+
+        if num_samples == 0:
+            raise RuntimeError("Training data yielded no batches")
+
+        avg_loss = epoch_loss / num_samples
+        scheduler.step(avg_loss)
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            best_state = copy.deepcopy(model.state_dict())
+
+    model.load_state_dict(best_state)
+    return best_state
+
+
+def _compress(model: VQVAE, loader: DataLoader, out_path: Path, device: str) -> int:
+    """Compress every corpus vector to PQ codes; returns the row count."""
+    device = resolve_device(device)
     model.to(device)
     model.eval()
-    out = []
-    
-    with torch.no_grad():
-        for batch in tqdm(loader, desc="Compressing"):
-            try:
-                batch = batch.to(device)
-                _, idx, _, _ = model(batch)
-                out.append(idx.cpu().numpy().astype(np.uint16))
-            except Exception as e:
-                print(f"⚠️ Error compressing batch: {e}")
-                continue
-    
-    if out:
-        compressed = np.concatenate(out)
-        compressed.tofile(out_path)
-        print(f"✅ Compressed {len(compressed)} vectors to {out_path}")
-    else:
-        raise RuntimeError("No data was successfully compressed")
+
+    chunks = []
+    for batch in tqdm(loader, desc="Compressing"):
+        chunks.append(model.compress(batch.to(device)))
+    if not chunks:
+        raise RuntimeError("No data was compressed")
+
+    codes = np.concatenate(chunks, axis=0)
+    np.save(out_path, codes)
+    return codes.shape[0]
+
 
 def train_corpus(corpus_npy: str,
-                input_dim: int,
-                epochs: int = 10,  # Increased default epochs
-                latent_bits: int = 16,
-                batch_size: int = 8192,  # Increased from 4096 to 8192
-                device: str = "cuda",
-                output_dir: Optional[str] = None,
-                learning_rate: float = 1e-3,  # Increased from 3e-4 to 1e-3
-                hidden_dim: int = 1024,
-                commitment_beta: float = 0.1) -> str:  # Added commitment loss weight
-    """Train VQ-VAE model on a corpus of embeddings.
-    
+                 input_dim: int,
+                 epochs: int = 10,
+                 num_subquantizers: int = 8,
+                 codes_per_subquantizer: int = 256,
+                 batch_size: int = 8192,
+                 device: str = "cuda",
+                 output_dir: Optional[str] = None,
+                 learning_rate: float = 1e-3,
+                 hidden_dim: int = 1024,
+                 commitment_beta: float = 0.25,
+                 embedding_model: Optional[str] = None,
+                 latent_bits: Optional[int] = None) -> str:
+    """Train a product-quantized VQ-VAE on a corpus of embeddings.
+
     Args:
-        corpus_npy: Path to .npy file containing embeddings
-        input_dim: Dimension of input embeddings
-        epochs: Number of training epochs (increased default to 10)
-        latent_bits: Number of bits for latent representation
-        batch_size: Training batch size (increased default to 8192)
-        device: Device to train on ('cuda' or 'cpu')
-        output_dir: Directory to save model artifacts (default: current directory)
-        learning_rate: Learning rate for optimizer (increased default to 1e-3)
-        hidden_dim: Hidden layer dimension
-        commitment_beta: Commitment loss weight for VQ-VAE (lower = less quantization pressure)
-        
+        corpus_npy: Path to a .npy file of shape (N, input_dim).
+        input_dim: Dimension of the input embeddings.
+        epochs: Training epochs.
+        num_subquantizers: PQ subspaces (M); each document is stored as M codes.
+        codes_per_subquantizer: Codebook size per subspace (K); K <= 256 keeps
+            storage at one byte per code.
+        batch_size: Training batch size.
+        device: 'cuda' or 'cpu' (falls back to CPU when CUDA is unavailable).
+        output_dir: Where to write artifacts (default: current directory).
+        learning_rate: Adam learning rate.
+        hidden_dim: Encoder/decoder hidden width.
+        commitment_beta: VQ commitment loss weight.
+        embedding_model: Recorded in metadata so the index knows which
+            sentence-transformers model produced the corpus.
+        latent_bits: Deprecated pre-v3 parameter; mapped to an equivalent
+            number of subquantizers with a warning.
+
     Returns:
-        Path to the output directory containing trained model
+        Path to the output directory containing vqvae.pt, codes.npy,
+        and vqvae_meta.json.
     """
-    # Validate inputs
+    if latent_bits is not None:
+        num_subquantizers = max(2, latent_bits // 8)
+        warnings.warn(
+            f"latent_bits is deprecated; using num_subquantizers="
+            f"{num_subquantizers} ({num_subquantizers * 8} bits/doc) instead",
+            DeprecationWarning,
+        )
+
     if not os.path.exists(corpus_npy):
         raise FileNotFoundError(f"Corpus file not found: {corpus_npy}")
-    
     if input_dim <= 0:
         raise ValueError(f"input_dim must be positive, got {input_dim}")
-    
     if epochs <= 0:
         raise ValueError(f"epochs must be positive, got {epochs}")
-    
-    # Setup output directory
+
     output_dir = Path(output_dir) if output_dir else Path.cwd()
     output_dir.mkdir(parents=True, exist_ok=True)
-    
-    print(f"🏋️ Training VQ-VAE:")
-    print(f"  📁 Corpus: {corpus_npy}")
-    print(f"  📊 Input dim: {input_dim}")
-    print(f"  🔧 Latent bits: {latent_bits}")
-    print(f"  ⚡ Device: {device}")
-    print(f"  💾 Output: {output_dir}")
-    
-    try:
-        # Create dataset and dataloader
-        ds = NPZStreamDataset(corpus_npy, batch_size, input_dim)
-        dl = DataLoader(ds, batch_size=None)
-        
-        # Create model
-        model = VQVAE(input_dim, hidden=hidden_dim, latent_bits=latent_bits)
-        # Update VQ layer commitment loss weight for better quantization  
-        model.vq.beta = commitment_beta
-        print(f"📐 Model created with latent dim: {model.lat_dim}, commitment beta: {commitment_beta}")
-        
-        # Train model
-        _train_loop(model, dl, epochs, device, learning_rate)
-        
-        # Save model state
-        model_path = output_dir / "vqvae.pt"
-        torch.save(model.state_dict(), model_path)
-        print(f"💾 Model saved: {model_path}")
-        
-        # Compress dataset
-        codes_path = output_dir / "corpus.codes.bin"
-        _compress(model, dl, codes_path, device)
-        
-        # Save metadata
-        meta = {
-            "input_dim": input_dim,
-            "latent_bits": latent_bits,
-            "latent_dim": model.lat_dim,
-            "hidden_dim": hidden_dim,
-            "epochs": epochs,
-            "learning_rate": learning_rate,
-            "commitment_beta": commitment_beta
-        }
-        meta_path = output_dir / "vqvae_meta.json"
-        with open(meta_path, "w") as f:
-            json.dump(meta, f, indent=2)
-        
-        print("✅ Training completed successfully!")
-        print(f"📁 Artifacts saved in: {output_dir}")
-        print(f"   - {model_path.name}")
-        print(f"   - {codes_path.name}")
-        print(f"   - {meta_path.name}")
-        
-        return str(output_dir)
-        
-    except Exception as e:
-        print(f"❌ Training failed: {e}")
-        raise 
+
+    ds = NPZStreamDataset(corpus_npy, batch_size, input_dim)
+    dl = DataLoader(ds, batch_size=None)
+
+    model = VQVAE(
+        input_dim,
+        hidden=hidden_dim,
+        num_subquantizers=num_subquantizers,
+        codes_per_subquantizer=codes_per_subquantizer,
+        beta=commitment_beta,
+    )
+    bytes_per_doc = model.codes_dtype.itemsize * num_subquantizers
+    print(
+        f"Training VQ-VAE: latent_dim={model.lat_dim}, M={num_subquantizers}, "
+        f"K={codes_per_subquantizer} -> {bytes_per_doc} bytes/doc "
+        f"(vs {input_dim * 4} bytes float32)"
+    )
+
+    _train_loop(model, dl, epochs, device, learning_rate)
+
+    torch.save(model.state_dict(), output_dir / "vqvae.pt")
+    n_docs = _compress(model, dl, output_dir / "codes.npy", device)
+
+    from .embedding import DEFAULT_EMBEDDING_MODEL
+    meta = {
+        "format_version": 3,
+        "embedding_model": embedding_model or DEFAULT_EMBEDDING_MODEL,
+        "epochs": epochs,
+        "learning_rate": learning_rate,
+        "commitment_beta": commitment_beta,
+        "num_documents": n_docs,
+        **model.config(),
+    }
+    with open(output_dir / "vqvae_meta.json", "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+
+    print(f"Training complete. Artifacts in {output_dir}: vqvae.pt, codes.npy, vqvae_meta.json")
+    return str(output_dir)

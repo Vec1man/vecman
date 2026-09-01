@@ -1,29 +1,23 @@
-"""VECMAN utility functions for training and retrieval."""
+"""VECMAN utility functions for training, embedding and retrieval."""
 
-from .training import train_corpus, NPZStreamDataset
+from .embedding import embed_texts, get_embedder
 from .retrieval import (
-    embed_texts,
-    save_jsonl, 
     load_assets,
     retrieve,
-    retrieve_vqvae,
+    save_jsonl,
     semantic_retrieve,
     semantic_retrieve_with_scores,
-    generate_answer
 )
+from .training import NPZStreamDataset, train_corpus
 
 __all__ = [
-    # Training utilities
     "train_corpus",
     "NPZStreamDataset",
-    
-    # Retrieval utilities
     "embed_texts",
+    "get_embedder",
     "save_jsonl",
     "load_assets",
     "retrieve",
-    "retrieve_vqvae", 
     "semantic_retrieve",
     "semantic_retrieve_with_scores",
-    "generate_answer"
-] 
+]

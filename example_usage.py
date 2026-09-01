@@ -1,185 +1,87 @@
-#!/usr/bin/env python3
-"""
-VECMAN Example Usage
+"""VECMAN v3 example: train, index, search, and (optionally) generate.
 
-This script demonstrates how to use the VECMAN package for text embedding,
-training a VQ-VAE model, and performing retrieval-augmented generation.
+Run with:  python example_usage.py
 """
 
 import os
+
 import numpy as np
-from pathlib import Path
-from vecman import VQVAE, train_corpus, embed_texts, save_jsonl, load_assets, retrieve, generate_answer
 
-def main():
-    # Example data - more diverse examples for better training + synthetic variations
-    base_texts = [
-        "Machine learning is a subset of artificial intelligence that enables computers to learn and improve from experience.",
-        "Deep learning uses neural networks with multiple layers to model and understand complex patterns in data.",
-        "Natural language processing helps computers understand, interpret, and generate human language in a valuable way.",
-        "Computer vision enables machines to interpret and analyze visual information from the world around them.",
-        "Reinforcement learning trains agents through rewards and penalties to make sequential decisions in an environment.",
-        "Supervised learning uses labeled training data to learn a mapping from inputs to outputs.",
-        "Unsupervised learning finds hidden patterns in data without using labeled examples.",
-        "Transfer learning leverages pre-trained models to solve new but related problems with less data.",
-        "Feature engineering is the process of selecting and transforming variables for machine learning models.",
-        "Cross-validation is a technique to assess how well a model will generalize to independent datasets."
-    ]
-    
-    # Add synthetic variations to expand training data for better VQ-VAE learning
-    synthetic_texts = [
-        # ML variations
-        "Artificial intelligence includes machine learning as a key component for learning from data.",
-        "Machine learning algorithms improve performance through experience and data exposure.",
-        "AI systems use machine learning to adapt and enhance their capabilities over time.",
-        
-        # Deep learning variations  
-        "Neural networks with multiple hidden layers form the foundation of deep learning systems.",
-        "Deep learning models excel at pattern recognition through layered neural architectures.",
-        "Multi-layer neural networks enable deep learning to solve complex recognition tasks.",
-        
-        # NLP variations
-        "Language models help computers process and understand human communication patterns.",
-        "Text processing and natural language understanding are core NLP capabilities.",
-        "Computational linguistics enables machines to work with human language effectively.",
-        
-        # Computer vision variations
-        "Image recognition and visual analysis are primary goals of computer vision systems.",
-        "Visual perception algorithms help machines understand and interpret image content.",
-        "Computer vision systems process visual data to extract meaningful information.",
-        
-        # Supervised learning variations
-        "Training with labeled examples enables supervised learning algorithms to make predictions.",
-        "Supervised algorithms learn input-output mappings from annotated training datasets.",
-        "Classification and regression are common supervised learning problem types.",
-        
-        # Unsupervised learning variations
-        "Clustering and dimensionality reduction are key unsupervised learning techniques.",
-        "Pattern discovery in unlabeled data is the main goal of unsupervised methods.",
-        "Unsupervised algorithms identify hidden structures without labeled training examples."
-    ]
-    
-    # Combine base and synthetic data for richer training
-    texts = base_texts + synthetic_texts
-    
-    print("🚀 VECMAN Example Usage")
-    print("=" * 50)
-    
-    try:
-        # Step 1: Embed texts
-        print("📝 Step 1: Embedding texts...")
-        embeddings = embed_texts(texts)
-        print(f"   Generated embeddings shape: {embeddings.shape}")
-        
-        # Step 2: Save embeddings and documents
-        print("💾 Step 2: Saving data...")
-        corpus_path = "example_corpus.npy"
-        docs_path = "docs.jsonl"
-        
-        np.save(corpus_path, embeddings)
-        save_jsonl(texts, docs_path)
-        print(f"   Saved: {corpus_path}, {docs_path}")
-        
-        # Step 3: Train VQ-VAE
-        print("🏋️ Step 3: Training VQ-VAE...")
-        output_dir = train_corpus(
-            corpus_path, 
-            input_dim=embeddings.shape[1], 
-            epochs=10,  # Increased epochs
-            device="cpu",  # Using CPU for compatibility
-            latent_bits=20,  # Increased from 12 to 20 for better representation
-            batch_size=min(8192, len(texts) * 10),  # Increased batch size, but limit for small datasets
-            learning_rate=1e-3,  # Increased learning rate
-            commitment_beta=0.1  # Lower commitment loss for less quantization pressure
-        )
-        print(f"   Training completed! Output dir: {output_dir}")
-        
-        # Step 4: Load trained model
-        print("📂 Step 4: Loading trained model...")
-        vqvae, codes, docs = load_assets(output_dir)
-        print(f"   Loaded model with {len(docs)} documents")
-        
-        # Step 5: Perform retrieval with similarity scores - PURE VQ-VAE ONLY
-        print("🔍 Step 5: Testing PURE VQ-VAE retrieval (no semantic fallbacks)...")
-        questions = [
-            "What is machine learning?",
-            "How do neural networks work?",
-            "What is the difference between supervised and unsupervised learning?"
-        ]
-        
-        for question in questions:
-            print(f"\n   Query: {question}")
-            
-            # Get query embedding
-            q_vec = embed_texts([question])[0]
-            
-            # ONLY VQ-VAE retrieval - no semantic fallbacks
-            print("   🔧 VQ-VAE retrieval ONLY:")
-            vqvae_docs, vqvae_scores = retrieve(vqvae, codes, docs, q_vec, k=3, method="vqvae", return_scores=True)
-            for i, (doc, score) in enumerate(zip(vqvae_docs, vqvae_scores), 1):
-                print(f"      {i}. [{score:.3f}] {doc[:100]}...")
-        
-        # Step 6: Optional - Generate answer using ONLY VQ-VAE
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if api_key:
-            print("\n🤖 Step 6: Generating answer with PURE VQ-VAE context...")
-            question = "What is machine learning?"
-            q_vec = embed_texts([question])[0]
-            
-            # Use ONLY VQ-VAE method - no auto fallback
-            context_docs, context_scores = retrieve(vqvae, codes, docs, q_vec, k=3, method="vqvae", return_scores=True)
-            
-            # Show which documents were selected with scores
-            print(f"   📄 VQ-VAE selected context (avg score: {np.mean(context_scores):.3f}):")
-            for i, (doc, score) in enumerate(zip(context_docs, context_scores), 1):
-                print(f"      {i}. [{score:.3f}] {doc[:80]}...")
-            
-            # Use a more flexible prompt template
-            custom_template = """
-            You are a helpful assistant. Use the following information to answer the question.
-            If you can find relevant information in the context, provide a clear and informative answer.
-            If the context doesn't contain relevant information, say 'I don't have enough relevant information.'
+from vecman import VecmanIndex, embed_texts, generate_answer, save_jsonl, train_corpus
 
-            Context:
-            {context}
+TEXTS = [
+    "Machine learning is a subset of artificial intelligence that enables computers to learn from experience.",
+    "Deep learning uses neural networks with multiple layers to model complex patterns in data.",
+    "Natural language processing helps computers understand, interpret, and generate human language.",
+    "Computer vision enables machines to interpret and analyze visual information.",
+    "Reinforcement learning trains agents through rewards and penalties to make sequential decisions.",
+    "Supervised learning uses labeled training data to learn a mapping from inputs to outputs.",
+    "Unsupervised learning finds hidden patterns in data without labeled examples.",
+    "Transfer learning leverages pre-trained models to solve new but related problems with less data.",
+    "Feature engineering selects and transforms variables for machine learning models.",
+    "Cross-validation assesses how well a model generalizes to independent datasets.",
+    "Clustering and dimensionality reduction are key unsupervised learning techniques.",
+    "Classification and regression are common supervised learning problem types.",
+]
 
-            Question: {question}
 
-            Answer:
-            """
-            
-            try:
-                answer = generate_answer(question, context_docs, api_key=api_key, prompt_template=custom_template)
-                print(f"   Q: {question}")
-                print(f"   A: {answer}")
-            except Exception as e:
-                print(f"   ⚠️ Could not generate answer: {e}")
-        else:
-            print("\n🤖 Step 6: Skipping answer generation (no GOOGLE_API_KEY)")
-        
-        print("\n✅ VECMAN example completed successfully!")
-        
-        # Cleanup example files
-        cleanup_files = [corpus_path, docs_path]
-        for file_path in cleanup_files:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-                print(f"🧹 Cleaned up: {file_path}")
-        
-    except Exception as e:
-        print(f"❌ Example failed: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        # Cleanup on error
-        cleanup_files = ["example_corpus.npy", "docs.jsonl"]
-        for file_path in cleanup_files:
-            if os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                    print(f"🧹 Cleaned up: {file_path}")
-                except:
-                    pass
+def main() -> None:
+    work_dir = "example_index"
+
+    # 1. Embed the corpus and save training artifacts.
+    print("1. Embedding corpus...")
+    embeddings = embed_texts(TEXTS)
+    os.makedirs(work_dir, exist_ok=True)
+    corpus_path = os.path.join(work_dir, "corpus.npy")
+    np.save(corpus_path, embeddings)
+    save_jsonl(TEXTS, os.path.join(work_dir, "docs.jsonl"))
+
+    # 2. Train the product-quantized VQ-VAE. With M=4 subquantizers each
+    #    document is stored as 4 bytes (vs 1536 bytes of raw float32).
+    print("2. Training VQ-VAE...")
+    train_corpus(
+        corpus_path,
+        input_dim=embeddings.shape[1],
+        epochs=400,                # tiny corpus -> one step per epoch, so
+        num_subquantizers=4,       # many epochs are cheap and necessary
+        codes_per_subquantizer=16,
+        device="cpu",
+        output_dir=work_dir,
+        batch_size=64,
+        hidden_dim=256,
+    )
+
+    # 3. Load the index. Codes are decompressed ONCE here; queries after
+    #    this are a single encoder pass + one matrix multiplication.
+    print("3. Loading index...")
+    index = VecmanIndex.load(work_dir)
+    print(f"   {len(index)} documents, {index.codes.shape[1]} bytes each")
+
+    # 4. Search — including an incremental add and a metadata filter.
+    index.add_texts(
+        ["Gradient descent iteratively minimizes a loss function."],
+        metadatas=[{"topic": "optimization"}],
+    )
+    print("4. Searching...")
+    for question in [
+        "What is machine learning?",
+        "How do neural networks work?",
+        "How are models optimized?",
+    ]:
+        print(f"\n   Q: {question}")
+        for rank, result in enumerate(index.search(question, k=3), 1):
+            print(f"   {rank}. [{result.score:.3f}] {result.text[:80]}")
+
+    # 5. Optional: RAG answer generation (requires GOOGLE_API_KEY and
+    #    `pip install vecman[rag]`).
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if api_key:
+        question = "What is machine learning?"
+        contexts = [r.text for r in index.search(question, k=3)]
+        print(f"\n5. Gemini answer:\n   {generate_answer(question, contexts, api_key=api_key)}")
+    else:
+        print("\n5. Skipping answer generation (GOOGLE_API_KEY not set)")
+
 
 if __name__ == "__main__":
-    main() 
+    main()
